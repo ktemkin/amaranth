@@ -11,6 +11,32 @@ from ..build import *
 
 __all__ = ["EfinixPlatform"]
 
+# We'll need split our attributes between our port and its various buffers,
+# in order to match the format the Efinity wants.
+
+PIN_ATTRS = [
+    "io_standard"
+]
+INPUT_ATTRS = [
+    "conn_type",
+    "is_register",
+    "clock_name",
+    "is_clock_inverted",
+    "pull_option",
+    "is_schmitt_trigger",
+    "ddio_type",
+]
+OUTPUT_ATTRS = [
+    "is_clock_inverted",
+    "is_slew_rate",
+    "clock_name",
+    "tied_option",
+    "ddio_type",
+    "drive_strength",
+]
+OE_ATTRS = []
+
+
 
 class EfinixPlatform(TemplatedPlatform):
     """
@@ -44,7 +70,6 @@ class EfinixPlatform(TemplatedPlatform):
         **TemplatedPlatform.build_script_templates,
 
         # Project file.
-        # FIXME(ktemkin): trim generated options
         "{{name}}.xml": r"""
            <?xml version="1.0" encoding="UTF-8"?>
             <efx:project name="{{name}}" description="" last_change_date="at January 1 1970 00:00:00" location="." sw_version="2023.1.150" last_run_state="" last_run_tool="" last_run_flow="" config_result_in_sync="true" design_ood="sync" place_ood="" route_ood="sync" xmlns:efx="http://www.efinixinc.com/enf_proj" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.efinixinc.com/enf_proj enf_proj.xsd">
@@ -74,16 +99,16 @@ class EfinixPlatform(TemplatedPlatform):
            <?xml version="1.0" encoding="UTF-8"?>
             <efxpt:design_db name="{{name}}" device_def="{{platform.device}}{{platform.package}}" location="." version="2023.1.150" db_version="20231999" last_change_date="Sat Nov  4 21:14:37 2023" xmlns:efxpt="http://www.efinixinc.com/peri_design_db" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="http://www.efinixinc.com/peri_design_db peri_design_db.xsd ">
                 <efxpt:gpio_info device_def="{{platform.device}}{{platform.package}}">
-                    {% for port_name, pin_name, direction, port_attrs, input_attrs, output_attrs, output_enable_attrs in platform.iter_gpio_constraints() %}
-                        <efxpt:gpio name="{{pin_name}}" gpio_def="{{port_name}}" mode="{{direction}}" {%- for key, value in port_attrs.items() %} {{key}}={{value}}{% endfor %} >
+                    {% for port_name, pin_name, direction, lvds, port_attrs, input_attrs, output_attrs, output_enable_attrs in platform.iter_gpio_constraints() %}
+                        <efxpt:gpio name="{{pin_name}}" gpio_def="{{port_name}}" mode="{{direction}}" {%- for key, value in port_attrs.items() %} {{key}}="{{value}}"{% endfor %} >
                         {% if direction in ("input", "inout") %}
-                            <efxpt:input_config name="{{pin_name}}_IN"  conn_type="normal" {%- for key, value in input_attrs.items() %} {{key}}={{value}}{% endfor %} />
+                            <efxpt:input_config name="{{pin_name}}" {%- for key, value in input_attrs.items() %} {{key}}="{{value}}"{% endfor %} />
                         {% endif %}
                         {% if direction in ("output", "inout") %}
-                            <efxpt:output_config name="{{pin_name}}_OUT"  {%- for key, value in output_attrs.items() %} {{key}}={{value}}{% endfor %} />
+                            <efxpt:output_config name="{{pin_name}}"  {%- for key, value in output_attrs.items() %} {{key}}="{{value}}"{% endfor %} />
                         {% endif %}
                         {% if direction == "inout" %}
-                            <efxpt:output_enable_config name="{{port_name}}_OE"  {%- for key, value in output_enable_attrs.items() %} {{key}}={{value}}{% endfor %} />
+                            <efxpt:output_enable_config name="{{port_name}}"  {%- for key, value in output_enable_attrs.items() %} {{key}}="{{value}}"{% endfor %} />
                         {% endif %}
                         </efxpt:gpio>
                     {% endfor %}
@@ -115,16 +140,17 @@ class EfinixPlatform(TemplatedPlatform):
             {% endfor %}
         """,
 
-        # Wrapper script to help run the platform tool, which depends on a more complex
+        # Wrapper script to help run the platform python, which depends on a more complex
         # environment setup that can be created in Amaranth's PATH-based configuration.
         #
         # Nonetheless, we can't generate the resultant fields without the environment
         # available at-exec-time in the batch script; since values like EFINITY_HOME
         # will often be set using mechanisms like AMARANTH_ENV_EFINITY.
-        "build_platform_{{name}}.py": r"""
+        "run_platform_tool.py": r"""
             # Automatically generated wrapper. Do not edit.
             #    
             import os
+            import sys
             import glob
             import subprocess
             
@@ -137,16 +163,16 @@ class EfinixPlatform(TemplatedPlatform):
             
             # Build the neccessary environment for the script to run.
             target_env = os.environ.copy()
-            target_env["PYTHONHOME"] = target_pythonhome
-            target_env["EFXPT_HOME"] = os.path.join(efinity_home, "pt")
+            target_env["PYTHONHOME"]  = target_pythonhome
+            target_env["EFXPT_HOME"]  = os.path.join(efinity_home, "pt")
+            target_env["EFXPGM_HOME"] = os.path.join(efinity_home, "pgm")
+            target_env["EFXDBG_HOME"] = os.path.join(efinity_home, "debugger")
             
             # Finally, run the target python.
             subprocess.run([
                 target_python,
-                os.path.join(efinity_home, "scripts", "efx_run_pt.py"),
-                "{{name}}",
-                "{{platform.family}}",
-                "{{platform.device}}{{platform.package}}"
+                os.path.join(efinity_home, sys.argv[1]),
+                *sys.argv[2:]
             ], env=target_env)
         """
     }
@@ -174,7 +200,15 @@ class EfinixPlatform(TemplatedPlatform):
 
         # Next, convert our I/O description into raw CSV routing constraints,
         # substituting GPIO pin names for device-specific tile locations.
-        sys.executable + " -E build_platform_{{name}}.py" + " >NUL",
+        sys.executable + " -E run_platform_tool.py" + r"""
+                scripts/efx_run_pt.py
+                "{{name}}"
+                "{{platform.family}}"
+                "{{platform.device}}{{platform.package}}"
+                {% if quiet %}
+                >NUL
+                {% endif %}
+        """,
 
         # Next, PNR.
         r"""
@@ -227,11 +261,41 @@ class EfinixPlatform(TemplatedPlatform):
         """,
     ]
 
-    def _split_buffer_attrs(self, attrs):
-        """ Splits Amaranth-style pin attributes based on XML section Efinity wants them in. """
+    def _generate_efinix_attrs(self, res, attrs):
+        """ Generates the collections of attributes Efinity expects.
 
-        # FIXME(ktemkin): implement
-        return {}, {}, {}, {}
+        Attributes for Efinity are spread out over the entire pin definition,
+        as well as for each of the input/output/enable definitions for each pin.
+        """
+
+        pin_attrs = {}
+        in_attrs  = {}
+        out_attrs = {}
+        oe_attrs  = {}
+
+        # Place each attribute each the appropriate bucket.
+        for attr, value in attrs.items():
+
+            if attr in PIN_ATTRS:
+                pin_attrs[attr] = value
+            if attr in INPUT_ATTRS:
+                in_attrs[attr] = value
+            if attr in OUTPUT_ATTRS:
+                out_attrs[attr] = value
+            if attr in OE_ATTRS:
+                oe_attrs[attr] = value
+
+
+        # If the user didn't provide a connection type, generate one for them,
+        # as this attribute is required.
+        if not 'conn_type' in in_attrs:
+            if res.clock:
+                in_attrs['conn_type'] = "gclk"
+            else:
+                in_attrs['conn_type'] = "normal"
+
+
+        return pin_attrs, in_attrs, out_attrs, oe_attrs
 
 
     def _direction_from_resource(self, res):
@@ -257,27 +321,40 @@ class EfinixPlatform(TemplatedPlatform):
         for res, pin, port, attrs in self._ports:
 
             # Skip anything that's not based on a simple GPIO pin.
-            if not isinstance(res.ios[0], Pins):
-                continue
+            is_differential = isinstance(res.ios[0], DiffPairs)
 
             # Get any pins associated with the given port.
             pin_names = res.ios[0].map_names(self._conn_pins, res)
 
             # Split our attributes into things that should apply to pins,
             # and attributes that should be put on their inner direction fields.
-            bit_attrs, in_attrs, out_attrs, oe_attrs = self._split_buffer_attrs(attrs)
+            bit_attrs, in_attrs, out_attrs, oe_attrs = self._generate_efinix_attrs(res, attrs)
 
             # Get our direction "mode", in the format Efinity needs.
             direction = self._direction_from_resource(res)
 
             # If this is a scalar, output it directly.
             if len(pin_names) == 1:
-                yield pin_names[0], port.io.name, direction, bit_attrs, in_attrs, out_attrs, oe_attrs
+                yield pin_names[0], port.io.name, direction, is_differential, bit_attrs, in_attrs, out_attrs, oe_attrs
 
             # Otherwise, iterate over each bit.
             else:
                 for bit, pin_name in enumerate(pin_names):
-                    yield pin_name, "{}[{}]".format(port.io.name, bit), direction, bit_attrs, in_attrs, out_attrs, oe_attrs
+                    yield pin_name, "{}[{}]".format(port.io.name, bit), direction, is_differential, bit_attrs, in_attrs, out_attrs, oe_attrs
+
+
+    def run_efinity_platform_tool(self, products, *args):
+        """ Helper function that runs an Efinity platform tool. """
+
+        import subprocess
+
+        with products.extract("run_platform_tool.py") as helper_script:
+            subprocess.check_call([
+                sys.executable,
+                "-E",
+                helper_script,
+                *args
+            ])
 
 
     # Common logic
@@ -291,6 +368,7 @@ class EfinixPlatform(TemplatedPlatform):
         # Otherwise, assume a default value.
         else:
             return super().default_clk_constraint
+
 
     def create_missing_domain(self, name):
         if name == "sync" and self.default_clk is not None:

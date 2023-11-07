@@ -3,7 +3,9 @@
 import warnings
 import importlib
 
-__all__ = ["EfinixTrionPlatform"]
+from .. import vendor
+
+__all__ = ["EfinixPlatform"]
 
 
 def __getattr__(name):
